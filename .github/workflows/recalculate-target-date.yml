@@ -21,7 +21,6 @@ jobs:
           echo "UTC now: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           echo "ORG=$ORG PROJECT_NUMBER=$PROJECT_NUMBER"
 
-          # Counters
           TOTAL_ITEMS=0
           ELIGIBLE_ITEMS=0
           UPDATED_ITEMS=0
@@ -29,7 +28,6 @@ jobs:
           SKIPPED_MISSING_FIELDS=0
           ERROR_ITEMS=0
 
-          # 1) Get Project + field IDs
           echo "==> Loading project metadata and field IDs..."
           PROJECT_JSON=$(gh api graphql -f query='
             query($org:String!, $number:Int!) {
@@ -65,7 +63,6 @@ jobs:
             exit 1
           fi
 
-          # 2) Paginate through ALL items (not only first 100)
           echo "==> Fetching project items with pagination..."
           AFTER=""
           PAGE=0
@@ -80,14 +77,12 @@ jobs:
                   organization(login:$org) {
                     projectV2(number:$number) {
                       items(first:100, after:$after) {
-                        pageInfo {
-                          hasNextPage
-                          endCursor
-                        }
+                        pageInfo { hasNextPage endCursor }
                         nodes {
                           id
                           fieldValues(first:50) {
                             nodes {
+                              __typename
                               ... on ProjectV2ItemFieldNumberValue {
                                 number
                                 field { ... on ProjectV2FieldCommon { name } }
@@ -96,23 +91,17 @@ jobs:
                                 date
                                 field { ... on ProjectV2FieldCommon { name } }
                               }
+                              ... on ProjectV2ItemFieldTextValue {
+                                text
+                                field { ... on ProjectV2FieldCommon { name } }
+                              }
                             }
                           }
                           content {
                             __typename
-                            ... on Issue {
-                              number
-                              title
-                              url
-                            }
-                            ... on PullRequest {
-                              number
-                              title
-                              url
-                            }
-                            ... on DraftIssue {
-                              title
-                            }
+                            ... on Issue { number title url }
+                            ... on PullRequest { number title url }
+                            ... on DraftIssue { title }
                           }
                         }
                       }
@@ -125,14 +114,12 @@ jobs:
                   organization(login:$org) {
                     projectV2(number:$number) {
                       items(first:100, after:$after) {
-                        pageInfo {
-                          hasNextPage
-                          endCursor
-                        }
+                        pageInfo { hasNextPage endCursor }
                         nodes {
                           id
                           fieldValues(first:50) {
                             nodes {
+                              __typename
                               ... on ProjectV2ItemFieldNumberValue {
                                 number
                                 field { ... on ProjectV2FieldCommon { name } }
@@ -141,23 +128,17 @@ jobs:
                                 date
                                 field { ... on ProjectV2FieldCommon { name } }
                               }
+                              ... on ProjectV2ItemFieldTextValue {
+                                text
+                                field { ... on ProjectV2FieldCommon { name } }
+                              }
                             }
                           }
                           content {
                             __typename
-                            ... on Issue {
-                              number
-                              title
-                              url
-                            }
-                            ... on PullRequest {
-                              number
-                              title
-                              url
-                            }
-                            ... on DraftIssue {
-                              title
-                            }
+                            ... on Issue { number title url }
+                            ... on PullRequest { number title url }
+                            ... on DraftIssue { title }
                           }
                         }
                       }
@@ -169,7 +150,6 @@ jobs:
             PAGE_COUNT=$(echo "$ITEMS_JSON" | jq '.data.organization.projectV2.items.nodes | length')
             echo "Page $PAGE items: $PAGE_COUNT"
 
-            # 3) Process each item
             while IFS= read -r item; do
               TOTAL_ITEMS=$((TOTAL_ITEMS + 1))
 
@@ -179,11 +159,10 @@ jobs:
               ITEM_TITLE=$(echo "$item" | jq -r '.content.title // "<no title>"')
               ITEM_NUMBER=$(echo "$item" | jq -r '.content.number // empty')
 
-              DAYS_RAW=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Days") | .number // empty' | head -n1)
-              START=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Start date") | .date // empty' | head -n1)
-              CURRENT_TARGET=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Target date") | .date // empty' | head -n1)
+              DAYS_RAW=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Days") | (.number // .text // empty)' | head -n1)
+              START=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Start date") | (.date // .text // empty)' | head -n1)
+              CURRENT_TARGET=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Target date") | (.date // .text // empty)' | head -n1)
 
-              # For integer Days, normalize safely
               DAYS=""
               if [ -n "$DAYS_RAW" ]; then
                 DAYS=$(printf "%.0f" "$DAYS_RAW")
@@ -236,7 +215,6 @@ jobs:
                 UPDATED_ITEMS=$((UPDATED_ITEMS + 1))
                 echo "Result: UPDATED"
               fi
-
             done < <(echo "$ITEMS_JSON" | jq -c '.data.organization.projectV2.items.nodes[]')
 
             HAS_NEXT=$(echo "$ITEMS_JSON" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
