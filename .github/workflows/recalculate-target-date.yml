@@ -279,51 +279,57 @@ jobs:
                 SKIPPED_MISSING_END_FIELDS=$((SKIPPED_MISSING_END_FIELDS + 1))
               fi
 
-              # Recalculate HOURS = DAYS * HOURS_AVAILABILITY
+              # Recalculate HOURS = DAYS * HOURS_AVAILABILITY (integers)
               if [ -n "$days_raw" ] && [ -n "$hours_avail_raw" ]; then
                 ELIGIBLE_HOURS_ITEMS=$((ELIGIBLE_HOURS_ITEMS + 1))
 
-                days_num="$(echo "$days_raw" | tr ',' '.')"
-                hours_avail_num="$(echo "$hours_avail_raw" | tr ',' '.')"
-
-                if [[ "$days_num" =~ ^-?[0-9]+([.][0-9]+)?$ ]] && [[ "$hours_avail_num" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
-                  new_hours="$(awk -v d="$days_num" -v h="$hours_avail_num" 'BEGIN { printf "%.4f", d*h }')"
-
-                  current_hours_norm=""
-                  if [[ "${hours_raw:-}" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
-                    current_hours_norm="$(awk -v x="$hours_raw" 'BEGIN { printf "%.4f", x }')"
-                  fi
-
-                  if [ "$new_hours" != "$current_hours_norm" ]; then
-                    echo "Updating HOURS: item=$ITEM_ID days=$days_num hours_avail=$hours_avail_num old=${hours_raw:-<empty>} new=$new_hours"
-
-                    if ! gh api graphql -f query='
-                      mutation($project:ID!, $item:ID!, $field:ID!, $value:Float!) {
-                        updateProjectV2ItemFieldValue(input:{
-                          projectId:$project
-                          itemId:$item
-                          fieldId:$field
-                          value:{ number:$value }
-                        }) {
-                          projectV2Item { id }
-                        }
-                      }' \
-                      -f project="$PROJECT_ID" \
-                      -f item="$ITEM_ID" \
-                      -f field="$HOURS_FIELD_ID" \
-                      -f value="$new_hours" \
-                      --jq '.data.updateProjectV2ItemFieldValue.projectV2Item.id' >/dev/null; then
-                      echo "WARN: failed updating HOURS for item=$ITEM_ID (value=$new_hours)"
-                      ERROR_ITEMS=$((ERROR_ITEMS + 1))
-                    else
-                      UPDATED_HOURS_ITEMS=$((UPDATED_HOURS_ITEMS + 1))
-                    fi
-                  else
-                    SKIPPED_SAME_HOURS=$((SKIPPED_SAME_HOURS + 1))
-                  fi
-                else
-                  echo "WARN: item=$ITEM_ID invalid numeric days='$days_raw' or hours_availability='$hours_avail_raw' (skipping hours recalc)"
+                # Accept values like 5, 5.0, 5,0 and convert to integer
+                days_int="$(echo "$days_raw" | tr ',' '.' | awk 'BEGIN{ok=1} /^[0-9]+([.][0]+)?$/ {print int($1); ok=0} END{if(ok) exit 1}')"
+                if [ $? -ne 0 ]; then
+                  echo "WARN: item=$ITEM_ID invalid integer days='$days_raw' (skipping hours recalc)"
                   ERROR_ITEMS=$((ERROR_ITEMS + 1))
+                else
+                  hours_avail_int="$(echo "$hours_avail_raw" | tr ',' '.' | awk 'BEGIN{ok=1} /^[0-9]+([.][0]+)?$/ {print int($1); ok=0} END{if(ok) exit 1}')"
+                  if [ $? -ne 0 ]; then
+                    echo "WARN: item=$ITEM_ID invalid integer hours_availability='$hours_avail_raw' (skipping hours recalc)"
+                    ERROR_ITEMS=$((ERROR_ITEMS + 1))
+                  else
+                    new_hours_int=$((days_int * hours_avail_int))
+
+                    current_hours_int=""
+                    if [[ "${hours_raw:-}" =~ ^[0-9]+([.][0]+)?$ ]]; then
+                      current_hours_int="$(echo "$hours_raw" | tr ',' '.' | awk '{print int($1)}')"
+                    fi
+
+                    if [ "$new_hours_int" != "${current_hours_int:-}" ]; then
+                      echo "Updating HOURS: item=$ITEM_ID days=$days_int hours_avail=$hours_avail_int old=${hours_raw:-<empty>} new=$new_hours_int"
+
+                      # IMPORTANT: for this mutation, send number variable as String
+                      if ! gh api graphql -f query='
+                        mutation($project:ID!, $item:ID!, $field:ID!, $value:String!) {
+                          updateProjectV2ItemFieldValue(input:{
+                            projectId:$project
+                            itemId:$item
+                            fieldId:$field
+                            value:{ number:$value }
+                          }) {
+                            projectV2Item { id }
+                          }
+                        }' \
+                        -f project="$PROJECT_ID" \
+                        -f item="$ITEM_ID" \
+                        -f field="$HOURS_FIELD_ID" \
+                        -f value="$new_hours_int" \
+                        --jq '.data.updateProjectV2ItemFieldValue.projectV2Item.id' >/dev/null; then
+                        echo "WARN: failed updating HOURS for item=$ITEM_ID (value=$new_hours_int)"
+                        ERROR_ITEMS=$((ERROR_ITEMS + 1))
+                      else
+                        UPDATED_HOURS_ITEMS=$((UPDATED_HOURS_ITEMS + 1))
+                      fi
+                    else
+                      SKIPPED_SAME_HOURS=$((SKIPPED_SAME_HOURS + 1))
+                    fi
+                  fi
                 fi
               else
                 SKIPPED_MISSING_HOURS_FIELDS=$((SKIPPED_MISSING_HOURS_FIELDS + 1))
