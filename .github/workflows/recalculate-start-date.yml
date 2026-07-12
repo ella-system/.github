@@ -5,6 +5,8 @@ on:
     - cron: "*/15 * * * *"
   workflow_dispatch:
 
+permissions: {}
+
 jobs:
   recalc:
     runs-on: ubuntu-latest
@@ -35,6 +37,7 @@ jobs:
 
           PROJECT_START_DATE=""
           MIN_ISSUE_START=""
+          MIN_ISSUE_START_EPOCH=""
 
           TMP_ITEMS="$(mktemp)"
           trap 'rm -f "$TMP_ITEMS"' EXIT
@@ -173,11 +176,18 @@ jobs:
               fi
 
               if [ -n "$start_raw" ]; then
-                START_ITEMS_COUNT=$((START_ITEMS_COUNT + 1))
-                echo "${ITEM_ID}|${start_raw}" >> "$TMP_ITEMS"
+                start_epoch="$(date -u -d "$start_raw" '+%s' 2>/dev/null || true)"
+                if [ -z "$start_epoch" ]; then
+                  echo "WARN: item=$ITEM_ID invalid Issue start='$start_raw' (skipping)"
+                  ERROR_ITEMS=$((ERROR_ITEMS + 1))
+                else
+                  START_ITEMS_COUNT=$((START_ITEMS_COUNT + 1))
+                  echo "${ITEM_ID}|${start_raw}" >> "$TMP_ITEMS"
 
-                if [ -z "$MIN_ISSUE_START" ] || [[ "$start_raw" < "$MIN_ISSUE_START" ]]; then
-                  MIN_ISSUE_START="$start_raw"
+                  if [ -z "$MIN_ISSUE_START_EPOCH" ] || [ "$start_epoch" -lt "$MIN_ISSUE_START_EPOCH" ]; then
+                    MIN_ISSUE_START="$start_raw"
+                    MIN_ISSUE_START_EPOCH="$start_epoch"
+                  fi
                 fi
               fi
             done < <(echo "$ITEMS_JSON" | jq -r '.data.organization.projectV2.items.nodes[] | @base64')
@@ -207,14 +217,12 @@ jobs:
           fi
 
           project_start_epoch="$(date -u -d "$PROJECT_START_DATE" '+%s' 2>/dev/null || true)"
-          min_issue_start_epoch="$(date -u -d "$MIN_ISSUE_START" '+%s' 2>/dev/null || true)"
-
-          if [ -z "$project_start_epoch" ] || [ -z "$min_issue_start_epoch" ]; then
+          if [ -z "$project_start_epoch" ] || [ -z "$MIN_ISSUE_START_EPOCH" ]; then
             echo "::error::Invalid date value(s): PROJECT_START_DATE='$PROJECT_START_DATE' MIN_ISSUE_START='$MIN_ISSUE_START'"
             exit 1
           fi
 
-          OFFSET_DAYS=$(( (project_start_epoch - min_issue_start_epoch) / 86400 ))
+          OFFSET_DAYS=$(( (project_start_epoch - MIN_ISSUE_START_EPOCH) / 86400 ))
 
           echo "Computed anchor: PROJECT_START_DATE=$PROJECT_START_DATE MIN_ISSUE_START=$MIN_ISSUE_START OFFSET_DAYS=$OFFSET_DAYS"
 
