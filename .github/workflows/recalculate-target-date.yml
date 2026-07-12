@@ -21,6 +21,7 @@ jobs:
 
     steps:
       - name: Fetch project items and recalc dates/hours
+        shell: bash
         run: |
           set -Eeuo pipefail
 
@@ -43,7 +44,7 @@ jobs:
           ERROR_ITEMS=0
 
           echo "==> Loading project metadata and field IDs..."
-          PROJECT_JSON=$(gh api graphql -f query='
+          PROJECT_JSON="$(gh api graphql -f query='
             query($org:String!, $number:Int!) {
               organization(login:$org) {
                 projectV2(number:$number) {
@@ -56,16 +57,16 @@ jobs:
                   }
                 }
               }
-            }' -f org="$ORG" -F number=$PROJECT_NUMBER)
+            }' -f org="$ORG" -F number="$PROJECT_NUMBER")"
 
-          PROJECT_ID=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.id // empty')
-          PROJECT_TITLE=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.title // empty')
+          PROJECT_ID="$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.id // empty')"
+          PROJECT_TITLE="$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.title // empty')"
 
-          DAYS_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r --arg n "$DAYS_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)
-          START_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r --arg n "$START_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)
-          END_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r --arg n "$END_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)
-          HOURS_AVAIL_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r --arg n "$HOURS_AVAIL_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)
-          HOURS_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r --arg n "$HOURS_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)
+          DAYS_FIELD_ID="$(echo "$PROJECT_JSON" | jq -r --arg n "$DAYS_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)"
+          START_FIELD_ID="$(echo "$PROJECT_JSON" | jq -r --arg n "$START_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)"
+          END_FIELD_ID="$(echo "$PROJECT_JSON" | jq -r --arg n "$END_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)"
+          HOURS_AVAIL_FIELD_ID="$(echo "$PROJECT_JSON" | jq -r --arg n "$HOURS_AVAIL_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)"
+          HOURS_FIELD_ID="$(echo "$PROJECT_JSON" | jq -r --arg n "$HOURS_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)"
 
           echo "Project title: ${PROJECT_TITLE:-<empty>}"
           echo "PROJECT_ID=${PROJECT_ID:-<empty>}"
@@ -97,7 +98,7 @@ jobs:
             echo "---- Page $PAGE (after=${AFTER:-<none>})"
 
             if [ -n "$AFTER" ]; then
-              ITEMS_JSON=$(gh api graphql -f query='
+              ITEMS_JSON="$(gh api graphql -f query='
                 query($org:String!, $number:Int!, $after:String, $daysField:String!, $startField:String!, $endField:String!, $hoursAvailField:String!, $hoursField:String!) {
                   organization(login:$org) {
                     projectV2(number:$number) {
@@ -124,5 +125,220 @@ jobs:
                             __typename
                             ... on ProjectV2ItemFieldNumberValue { number }
                             ... on ProjectV2ItemFieldTextValue { text }
-                          }](#)*
-
+                          }
+                          hoursValue: fieldValueByName(name: $hoursField) {
+                            __typename
+                            ... on ProjectV2ItemFieldNumberValue { number }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }' \
+                -f org="$ORG" \
+                -F number="$PROJECT_NUMBER" \
+                -f after="$AFTER" \
+                -f daysField="$DAYS_FIELD_NAME" \
+                -f startField="$START_FIELD_NAME" \
+                -f endField="$END_FIELD_NAME" \
+                -f hoursAvailField="$HOURS_AVAIL_FIELD_NAME" \
+                -f hoursField="$HOURS_FIELD_NAME")"
+            else
+              ITEMS_JSON="$(gh api graphql -f query='
+                query($org:String!, $number:Int!, $daysField:String!, $startField:String!, $endField:String!, $hoursAvailField:String!, $hoursField:String!) {
+                  organization(login:$org) {
+                    projectV2(number:$number) {
+                      items(first:100) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                          id
+                          daysValue: fieldValueByName(name: $daysField) {
+                            __typename
+                            ... on ProjectV2ItemFieldNumberValue { number }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+                          startValue: fieldValueByName(name: $startField) {
+                            __typename
+                            ... on ProjectV2ItemFieldDateValue { date }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+                          endValue: fieldValueByName(name: $endField) {
+                            __typename
+                            ... on ProjectV2ItemFieldDateValue { date }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+                          hoursAvailValue: fieldValueByName(name: $hoursAvailField) {
+                            __typename
+                            ... on ProjectV2ItemFieldNumberValue { number }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+                          hoursValue: fieldValueByName(name: $hoursField) {
+                            __typename
+                            ... on ProjectV2ItemFieldNumberValue { number }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }' \
+                -f org="$ORG" \
+                -F number="$PROJECT_NUMBER" \
+                -f daysField="$DAYS_FIELD_NAME" \
+                -f startField="$START_FIELD_NAME" \
+                -f endField="$END_FIELD_NAME" \
+                -f hoursAvailField="$HOURS_AVAIL_FIELD_NAME" \
+                -f hoursField="$HOURS_FIELD_NAME")"
+            fi
+
+            PAGE_COUNT="$(echo "$ITEMS_JSON" | jq '.data.organization.projectV2.items.nodes | length')"
+            echo "Items on this page: $PAGE_COUNT"
+
+            while IFS= read -r ITEM_B64; do
+              [ -z "$ITEM_B64" ] && continue
+              TOTAL_ITEMS=$((TOTAL_ITEMS + 1))
+
+              ITEM_JSON="$(echo "$ITEM_B64" | base64 --decode)"
+              ITEM_ID="$(echo "$ITEM_JSON" | jq -r '.id')"
+
+              days_raw="$(echo "$ITEM_JSON" | jq -r '
+                if .daysValue == null then ""
+                elif .daysValue.__typename == "ProjectV2ItemFieldNumberValue" then (.daysValue.number // "")
+                elif .daysValue.__typename == "ProjectV2ItemFieldTextValue" then (.daysValue.text // "")
+                else "" end
+              ')"
+
+              start_raw="$(echo "$ITEM_JSON" | jq -r '
+                if .startValue == null then ""
+                elif .startValue.__typename == "ProjectV2ItemFieldDateValue" then (.startValue.date // "")
+                elif .startValue.__typename == "ProjectV2ItemFieldTextValue" then (.startValue.text // "")
+                else "" end
+              ')"
+
+              end_raw="$(echo "$ITEM_JSON" | jq -r '
+                if .endValue == null then ""
+                elif .endValue.__typename == "ProjectV2ItemFieldDateValue" then (.endValue.date // "")
+                elif .endValue.__typename == "ProjectV2ItemFieldTextValue" then (.endValue.text // "")
+                else "" end
+              ')"
+
+              hours_avail_raw="$(echo "$ITEM_JSON" | jq -r '
+                if .hoursAvailValue == null then ""
+                elif .hoursAvailValue.__typename == "ProjectV2ItemFieldNumberValue" then (.hoursAvailValue.number // "")
+                elif .hoursAvailValue.__typename == "ProjectV2ItemFieldTextValue" then (.hoursAvailValue.text // "")
+                else "" end
+              ')"
+
+              hours_raw="$(echo "$ITEM_JSON" | jq -r '
+                if .hoursValue == null then ""
+                elif .hoursValue.__typename == "ProjectV2ItemFieldNumberValue" then (.hoursValue.number // "")
+                elif .hoursValue.__typename == "ProjectV2ItemFieldTextValue" then (.hoursValue.text // "")
+                else "" end
+              ')"
+
+              # Recalculate END = START + DAYS
+              if [ -n "$days_raw" ] && [ -n "$start_raw" ]; then
+                ELIGIBLE_END_ITEMS=$((ELIGIBLE_END_ITEMS + 1))
+
+                days_int="$(printf '%.0f' "$days_raw" 2>/dev/null || true)"
+                if [ -z "${days_int:-}" ] || ! [[ "$days_int" =~ ^-?[0-9]+$ ]]; then
+                  echo "WARN: item=$ITEM_ID invalid days='$days_raw' (skipping end recalc)"
+                  ERROR_ITEMS=$((ERROR_ITEMS + 1))
+                else
+                  new_end="$(date -u -d "$start_raw +$days_int days" '+%Y-%m-%d' 2>/dev/null || true)"
+                  if [ -z "${new_end:-}" ]; then
+                    echo "WARN: item=$ITEM_ID invalid start date='$start_raw' (skipping end recalc)"
+                    ERROR_ITEMS=$((ERROR_ITEMS + 1))
+                  else
+                    if [ "$new_end" != "$end_raw" ]; then
+                      gh api graphql -f query='
+                        mutation($project:ID!, $item:ID!, $field:ID!, $date:Date!) {
+                          updateProjectV2ItemFieldValue(input:{
+                            projectId:$project
+                            itemId:$item
+                            fieldId:$field
+                            value:{ date:$date }
+                          }) {
+                            projectV2Item { id }
+                          }
+                        }' \
+                        -f project="$PROJECT_ID" \
+                        -f item="$ITEM_ID" \
+                        -f field="$END_FIELD_ID" \
+                        -f date="$new_end" >/dev/null
+
+                      UPDATED_END_ITEMS=$((UPDATED_END_ITEMS + 1))
+                      echo "Updated END: item=$ITEM_ID start=$start_raw days=$days_int old_end=${end_raw:-<empty>} new_end=$new_end"
+                    else
+                      SKIPPED_SAME_END=$((SKIPPED_SAME_END + 1))
+                    fi
+                  fi
+                fi
+              else
+                SKIPPED_MISSING_END_FIELDS=$((SKIPPED_MISSING_END_FIELDS + 1))
+              fi
+
+              # Recalculate HOURS = DAYS * HOURS_AVAILABILITY
+              if [ -n "$days_raw" ] && [ -n "$hours_avail_raw" ]; then
+                ELIGIBLE_HOURS_ITEMS=$((ELIGIBLE_HOURS_ITEMS + 1))
+
+                days_num="$(echo "$days_raw" | sed 's/,/./g')"
+                hours_avail_num="$(echo "$hours_avail_raw" | sed 's/,/./g')"
+
+                if [[ "$days_num" =~ ^-?[0-9]+([.][0-9]+)?$ ]] && [[ "$hours_avail_num" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+                  new_hours="$(awk -v d="$days_num" -v h="$hours_avail_num" 'BEGIN { printf "%.2f", d*h }')"
+
+                  # normaliza horas atuais para comparar
+                  current_hours_norm=""
+                  if [[ "${hours_raw:-}" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+                    current_hours_norm="$(awk -v x="$hours_raw" 'BEGIN { printf "%.2f", x }')"
+                  fi
+
+                  if [ "$new_hours" != "$current_hours_norm" ]; then
+                    gh api graphql -f query='
+                      mutation($project:ID!, $item:ID!, $field:ID!, $value:Float!) {
+                        updateProjectV2ItemFieldValue(input:{
+                          projectId:$project
+                          itemId:$item
+                          fieldId:$field
+                          value:{ number:$value }
+                        }) {
+                          projectV2Item { id }
+                        }
+                      }' \
+                      -f project="$PROJECT_ID" \
+                      -f item="$ITEM_ID" \
+                      -f field="$HOURS_FIELD_ID" \
+                      -F value="$new_hours" >/dev/null
+
+                    UPDATED_HOURS_ITEMS=$((UPDATED_HOURS_ITEMS + 1))
+                    echo "Updated HOURS: item=$ITEM_ID days=$days_num hours_avail=$hours_avail_num old_hours=${hours_raw:-<empty>} new_hours=$new_hours"
+                  else
+                    SKIPPED_SAME_HOURS=$((SKIPPED_SAME_HOURS + 1))
+                  fi
+                else
+                  echo "WARN: item=$ITEM_ID invalid numeric days='$days_raw' or hours_availability='$hours_avail_raw' (skipping hours recalc)"
+                  ERROR_ITEMS=$((ERROR_ITEMS + 1))
+                fi
+              else
+                SKIPPED_MISSING_HOURS_FIELDS=$((SKIPPED_MISSING_HOURS_FIELDS + 1))
+              fi
+
+            done < <(echo "$ITEMS_JSON" | jq -r '.data.organization.projectV2.items.nodes[] | @base64')
+
+            HAS_NEXT="$(echo "$ITEMS_JSON" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')"
+            END_CURSOR="$(echo "$ITEMS_JSON" | jq -r '.data.organization.projectV2.items.pageInfo.endCursor // empty')"
+
+            if [ "$HAS_NEXT" = "true" ] && [ -n "$END_CURSOR" ]; then
+              AFTER="$END_CURSOR"
+            else
+              break
+            fi
+          done
+
+          echo "==> Done"
+          echo "TOTAL_ITEMS=$TOTAL_ITEMS"
+          echo "ELIGIBLE_END_ITEMS=$ELIGIBLE_END_ITEMS UPDATED_END_ITEMS=$UPDATED_END_ITEMS SKIPPED_SAME_END=$SKIPPED_SAME_END SKIPPED_MISSING_END_FIELDS=$SKIPPED_MISSING_END_FIELDS"
+          echo "ELIGIBLE_HOURS_ITEMS=$ELIGIBLE_HOURS_ITEMS UPDATED_HOURS_ITEMS=$UPDATED_HOURS_ITEMS SKIPPED_SAME_HOURS=$SKIPPED_SAME_HOURS SKIPPED_MISSING_HOURS_FIELDS=$SKIPPED_MISSING_HOURS_FIELDS"
+          echo "ERROR_ITEMS=$ERROR_ITEMS"
