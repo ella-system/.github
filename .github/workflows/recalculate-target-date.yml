@@ -67,57 +67,104 @@ jobs:
 
           # 2) Paginate through ALL items (not only first 100)
           echo "==> Fetching project items with pagination..."
-          AFTER=null
+          AFTER=""
           PAGE=0
 
           while :; do
             PAGE=$((PAGE + 1))
-            echo "---- Page $PAGE (after=$AFTER)"
+            echo "---- Page $PAGE (after=${AFTER:-<none>})"
 
-            ITEMS_JSON=$(gh api graphql -f query='
-              query($org:String!, $number:Int!, $after:String) {
-                organization(login:$org) {
-                  projectV2(number:$number) {
-                    items(first:100, after:$after) {
-                      pageInfo {
-                        hasNextPage
-                        endCursor
-                      }
-                      nodes {
-                        id
-                        fieldValues(first:50) {
-                          nodes {
-                            ... on ProjectV2ItemFieldNumberValue {
-                              number
-                              field { ... on ProjectV2FieldCommon { name } }
-                            }
-                            ... on ProjectV2ItemFieldDateValue {
-                              date
-                              field { ... on ProjectV2FieldCommon { name } }
-                            }
-                          }
+            if [ -n "$AFTER" ]; then
+              ITEMS_JSON=$(gh api graphql -f query='
+                query($org:String!, $number:Int!, $after:String) {
+                  organization(login:$org) {
+                    projectV2(number:$number) {
+                      items(first:100, after:$after) {
+                        pageInfo {
+                          hasNextPage
+                          endCursor
                         }
-                        content {
-                          __typename
-                          ... on Issue {
-                            number
-                            title
-                            url
+                        nodes {
+                          id
+                          fieldValues(first:50) {
+                            nodes {
+                              ... on ProjectV2ItemFieldNumberValue {
+                                number
+                                field { ... on ProjectV2FieldCommon { name } }
+                              }
+                              ... on ProjectV2ItemFieldDateValue {
+                                date
+                                field { ... on ProjectV2FieldCommon { name } }
+                              }
+                            }
                           }
-                          ... on PullRequest {
-                            number
-                            title
-                            url
-                          }
-                          ... on DraftIssue {
-                            title
+                          content {
+                            __typename
+                            ... on Issue {
+                              number
+                              title
+                              url
+                            }
+                            ... on PullRequest {
+                              number
+                              title
+                              url
+                            }
+                            ... on DraftIssue {
+                              title
+                            }
                           }
                         }
                       }
                     }
                   }
-                }
-              }' -f org="$ORG" -F number=$PROJECT_NUMBER -f after="$AFTER")
+                }' -f org="$ORG" -F number=$PROJECT_NUMBER -f after="$AFTER")
+            else
+              ITEMS_JSON=$(gh api graphql -f query='
+                query($org:String!, $number:Int!, $after:String) {
+                  organization(login:$org) {
+                    projectV2(number:$number) {
+                      items(first:100, after:$after) {
+                        pageInfo {
+                          hasNextPage
+                          endCursor
+                        }
+                        nodes {
+                          id
+                          fieldValues(first:50) {
+                            nodes {
+                              ... on ProjectV2ItemFieldNumberValue {
+                                number
+                                field { ... on ProjectV2FieldCommon { name } }
+                              }
+                              ... on ProjectV2ItemFieldDateValue {
+                                date
+                                field { ... on ProjectV2FieldCommon { name } }
+                              }
+                            }
+                          }
+                          content {
+                            __typename
+                            ... on Issue {
+                              number
+                              title
+                              url
+                            }
+                            ... on PullRequest {
+                              number
+                              title
+                              url
+                            }
+                            ... on DraftIssue {
+                              title
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }' -f org="$ORG" -F number=$PROJECT_NUMBER)
+            fi
 
             PAGE_COUNT=$(echo "$ITEMS_JSON" | jq '.data.organization.projectV2.items.nodes | length')
             echo "Page $PAGE items: $PAGE_COUNT"
@@ -200,6 +247,12 @@ jobs:
             if [ "$HAS_NEXT" != "true" ]; then
               break
             fi
+
+            if [ -z "$END_CURSOR" ]; then
+              echo "::error::hasNextPage=true but endCursor is empty. Aborting to avoid infinite loop."
+              exit 1
+            fi
+
             AFTER="$END_CURSOR"
           done
 
