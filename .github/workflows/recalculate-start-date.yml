@@ -216,13 +216,18 @@ jobs:
             exit 0
           fi
 
-          project_start_epoch="$(date -u -d "$PROJECT_START_DATE" '+%s' 2>/dev/null || true)"
-          if [ -z "$project_start_epoch" ] || [ -z "$MIN_ISSUE_START_EPOCH" ]; then
+          project_start_norm="$(date -u -d "$PROJECT_START_DATE" '+%Y-%m-%d' 2>/dev/null || true)"
+          min_issue_start_norm="$(date -u -d "$MIN_ISSUE_START" '+%Y-%m-%d' 2>/dev/null || true)"
+
+          project_start_epoch="$(date -u -d "$project_start_norm" '+%s' 2>/dev/null || true)"
+          min_issue_start_epoch="$(date -u -d "$min_issue_start_norm" '+%s' 2>/dev/null || true)"
+
+          if [ -z "$project_start_epoch" ] || [ -z "$min_issue_start_epoch" ]; then
             echo "::error::Invalid date value(s): PROJECT_START_DATE='$PROJECT_START_DATE' MIN_ISSUE_START='$MIN_ISSUE_START'"
             exit 1
           fi
 
-          OFFSET_DAYS=$(( (project_start_epoch - MIN_ISSUE_START_EPOCH) / 86400 ))
+          OFFSET_DAYS=$(( (project_start_epoch - min_issue_start_epoch) / 86400 ))
 
           echo "Computed anchor: PROJECT_START_DATE=$PROJECT_START_DATE MIN_ISSUE_START=$MIN_ISSUE_START OFFSET_DAYS=$OFFSET_DAYS"
 
@@ -237,7 +242,12 @@ jobs:
             [ -z "${ITEM_ID:-}" ] && continue
             [ -z "${start_raw:-}" ] && continue
 
-            new_start="$(date -u -d "$start_raw ${OFFSET_DAYS} days" '+%Y-%m-%d' 2>/dev/null || true)"
+            if [ "$OFFSET_DAYS" -ge 0 ]; then
+              new_start="$(date -u -d "$start_raw +$OFFSET_DAYS days" '+%Y-%m-%d' 2>/dev/null || true)"
+            else
+              abs_offset_days=$(( -OFFSET_DAYS ))
+              new_start="$(date -u -d "$start_raw -$abs_offset_days days" '+%Y-%m-%d' 2>/dev/null || true)"
+            fi
             if [ -z "$new_start" ]; then
               echo "WARN: item=$ITEM_ID invalid start date='$start_raw' (skipping)"
               ERROR_ITEMS=$((ERROR_ITEMS + 1))
