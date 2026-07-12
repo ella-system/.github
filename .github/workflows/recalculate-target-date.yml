@@ -2,8 +2,8 @@ name: Recalculate Target Date from Days
 
 on:
   schedule:
-    - cron: '*/15 * * * *'   # a cada 15 minutos
-  workflow_dispatch:          # permite rodar manualmente pelo botão "Run workflow"
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
 
 jobs:
   recalc:
@@ -11,19 +11,33 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.PROJECT_PAT }}
       ORG: ella-system
-      PROJECT_NUMBER: 4   # <-- ajuste para o número real do seu Project
+      PROJECT_NUMBER: 4
     steps:
       - name: Fetch project items and recalc dates
         run: |
-          set -e
+          set -Eeuo pipefail
 
-          # 1. Descobre o ID do Project e dos campos default
+          echo "==> Starting recalculate-target-date workflow"
+          echo "UTC now: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          echo "ORG=$ORG PROJECT_NUMBER=$PROJECT_NUMBER"
+
+          # Counters
+          TOTAL_ITEMS=0
+          ELIGIBLE_ITEMS=0
+          UPDATED_ITEMS=0
+          SKIPPED_SAME_TARGET=0
+          SKIPPED_MISSING_FIELDS=0
+          ERROR_ITEMS=0
+
+          # 1) Get Project + field IDs
+          echo "==> Loading project metadata and field IDs..."
           PROJECT_JSON=$(gh api graphql -f query='
             query($org:String!, $number:Int!) {
               organization(login:$org) {
                 projectV2(number:$number) {
                   id
-                  fields(first:20) {
+                  title
+                  fields(first:100) {
                     nodes {
                       ... on ProjectV2FieldCommon { id name }
                     }
@@ -32,54 +46,175 @@ jobs:
               }
             }' -f org="$ORG" -F number=$PROJECT_NUMBER)
 
-          PROJECT_ID=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.id')
-          DAYS_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Days") | .id')
-          START_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Start date") | .id')
-          TARGET_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Target date") | .id')
+          PROJECT_ID=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.id // empty')
+          PROJECT_TITLE=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.title // empty')
+          DAYS_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Days") | .id' | head -n1)
+          START_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Start date") | .id' | head -n1)
+          TARGET_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Target date") | .id' | head -n1)
 
-          # 2. Busca todos os itens do project com os valores atuais
-          ITEMS_JSON=$(gh api graphql -f query='
-            query($org:String!, $number:Int!) {
-              organization(login:$org) {
-                projectV2(number:$number) {
-                  items(first:100) {
-                    nodes {
-                      id
-                      fieldValues(first:20) {
-                        nodes {
-                          ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2FieldCommon { name } } }
-                          ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2FieldCommon { name } } }
+          echo "Project title: ${PROJECT_TITLE:-<empty>}"
+          echo "PROJECT_ID=${PROJECT_ID:-<empty>}"
+          echo "DAYS_FIELD_ID=${DAYS_FIELD_ID:-<empty>}"
+          echo "START_FIELD_ID=${START_FIELD_ID:-<empty>}"
+          echo "TARGET_FIELD_ID=${TARGET_FIELD_ID:-<empty>}"
+
+          if [ -z "${PROJECT_ID:-}" ] || [ -z "${DAYS_FIELD_ID:-}" ] || [ -z "${START_FIELD_ID:-}" ] || [ -z "${TARGET_FIELD_ID:-}" ]; then
+            echo "::error::Missing required project/field IDs. Check field names exactly: Days, Start date, Target date."
+            echo "Available fields:"
+            echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.fields.nodes[]?.name'
+            exit 1
+          fi
+
+          # 2) Paginate through ALL items (not only first 100)
+          echo "==> Fetching project items with pagination..."
+          AFTER=null
+          PAGE=0
+
+          while :; do
+            PAGE=$((PAGE + 1))
+            echo "---- Page $PAGE (after=$AFTER)"
+
+            ITEMS_JSON=$(gh api graphql -f query='
+              query($org:String!, $number:Int!, $after:String) {
+                organization(login:$org) {
+                  projectV2(number:$number) {
+                    items(first:100, after:$after) {
+                      pageInfo {
+                        hasNextPage
+                        endCursor
+                      }
+                      nodes {
+                        id
+                        fieldValues(first:50) {
+                          nodes {
+                            ... on ProjectV2ItemFieldNumberValue {
+                              number
+                              field { ... on ProjectV2FieldCommon { name } }
+                            }
+                            ... on ProjectV2ItemFieldDateValue {
+                              date
+                              field { ... on ProjectV2FieldCommon { name } }
+                            }
+                          }
+                        }
+                        content {
+                          __typename
+                          ... on Issue {
+                            number
+                            title
+                            url
+                          }
+                          ... on PullRequest {
+                            number
+                            title
+                            url
+                          }
+                          ... on DraftIssue {
+                            title
+                          }
                         }
                       }
                     }
                   }
                 }
-              }
-            }' -f org="$ORG" -F number=$PROJECT_NUMBER)
+              }' -f org="$ORG" -F number=$PROJECT_NUMBER -f after="$AFTER")
 
-          # 3. Para cada item, calcula targetDate = startDate + days e atualiza se necessário
-          echo "$ITEMS_JSON" | jq -c '.data.organization.projectV2.items.nodes[]' | while read -r item; do
-            ITEM_ID=$(echo "$item" | jq -r '.id')
-            DAYS=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Days") | .number // empty')
-            START=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Start date") | .date // empty')
-            CURRENT_TARGET=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Target date") | .date // empty')
+            PAGE_COUNT=$(echo "$ITEMS_JSON" | jq '.data.organization.projectV2.items.nodes | length')
+            echo "Page $PAGE items: $PAGE_COUNT"
 
-            if [ -n "$DAYS" ] && [ -n "$START" ]; then
-              NEW_TARGET=$(date -u -d "$START + $DAYS days" +%Y-%m-%d)
+            # 3) Process each item
+            while IFS= read -r item; do
+              TOTAL_ITEMS=$((TOTAL_ITEMS + 1))
 
-              if [ "$NEW_TARGET" != "$CURRENT_TARGET" ]; then
-                echo "Atualizando item $ITEM_ID: $CURRENT_TARGET -> $NEW_TARGET"
-                gh api graphql -f query='
-                  mutation($project:ID!, $item:ID!, $field:ID!, $date:Date!) {
-                    updateProjectV2ItemFieldValue(input: {
-                      projectId: $project,
-                      itemId: $item,
-                      fieldId: $field,
-                      value: { date: $date }
-                    }) {
-                      projectV2Item { id }
-                    }
-                  }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$TARGET_FIELD_ID" -F date="$NEW_TARGET"
+              ITEM_ID=$(echo "$item" | jq -r '.id')
+              CONTENT_TYPE=$(echo "$item" | jq -r '.content.__typename // "Unknown"')
+              ITEM_URL=$(echo "$item" | jq -r '.content.url // empty')
+              ITEM_TITLE=$(echo "$item" | jq -r '.content.title // "<no title>"')
+              ITEM_NUMBER=$(echo "$item" | jq -r '.content.number // empty')
+
+              DAYS_RAW=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Days") | .number // empty' | head -n1)
+              START=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Start date") | .date // empty' | head -n1)
+              CURRENT_TARGET=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Target date") | .date // empty' | head -n1)
+
+              # For integer Days, normalize safely
+              DAYS=""
+              if [ -n "$DAYS_RAW" ]; then
+                DAYS=$(printf "%.0f" "$DAYS_RAW")
               fi
+
+              echo ""
+              echo "Item #$TOTAL_ITEMS | itemId=$ITEM_ID | type=$CONTENT_TYPE | number=${ITEM_NUMBER:-n/a}"
+              echo "Title: $ITEM_TITLE"
+              [ -n "$ITEM_URL" ] && echo "URL: $ITEM_URL"
+              echo "Fields => Days(raw)='${DAYS_RAW:-}' Days(int)='${DAYS:-}' Start='${START:-}' CurrentTarget='${CURRENT_TARGET:-}'"
+
+              if [ -z "$DAYS" ] || [ -z "$START" ]; then
+                SKIPPED_MISSING_FIELDS=$((SKIPPED_MISSING_FIELDS + 1))
+                echo "Result: SKIP (missing Days or Start date)"
+                continue
+              fi
+
+              ELIGIBLE_ITEMS=$((ELIGIBLE_ITEMS + 1))
+              NEW_TARGET=$(date -u -d "$START + $DAYS days" +%Y-%m-%d)
+              echo "Computed NEW_TARGET=$NEW_TARGET"
+
+              if [ "$NEW_TARGET" = "$CURRENT_TARGET" ]; then
+                SKIPPED_SAME_TARGET=$((SKIPPED_SAME_TARGET + 1))
+                echo "Result: SKIP (target already correct)"
+                continue
+              fi
+
+              echo "Updating Target date: '$CURRENT_TARGET' -> '$NEW_TARGET'"
+
+              set +e
+              UPDATE_OUTPUT=$(gh api graphql -f query='
+                mutation($project:ID!, $item:ID!, $field:ID!, $date:String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $project,
+                    itemId: $item,
+                    fieldId: $field,
+                    value: { date: $date }
+                  }) {
+                    projectV2Item { id }
+                  }
+                }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$TARGET_FIELD_ID" -f date="$NEW_TARGET" 2>&1)
+              STATUS=$?
+              set -e
+
+              if [ $STATUS -ne 0 ]; then
+                ERROR_ITEMS=$((ERROR_ITEMS + 1))
+                echo "::error::Failed to update item $ITEM_ID"
+                echo "$UPDATE_OUTPUT"
+              else
+                UPDATED_ITEMS=$((UPDATED_ITEMS + 1))
+                echo "Result: UPDATED"
+              fi
+
+            done < <(echo "$ITEMS_JSON" | jq -c '.data.organization.projectV2.items.nodes[]')
+
+            HAS_NEXT=$(echo "$ITEMS_JSON" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
+            END_CURSOR=$(echo "$ITEMS_JSON" | jq -r '.data.organization.projectV2.items.pageInfo.endCursor // empty')
+
+            echo "PageInfo => hasNextPage=$HAS_NEXT endCursor=${END_CURSOR:-<empty>}"
+
+            if [ "$HAS_NEXT" != "true" ]; then
+              break
             fi
+            AFTER="$END_CURSOR"
           done
+
+          echo ""
+          echo "================== SUMMARY =================="
+          echo "TOTAL_ITEMS=$TOTAL_ITEMS"
+          echo "ELIGIBLE_ITEMS=$ELIGIBLE_ITEMS"
+          echo "UPDATED_ITEMS=$UPDATED_ITEMS"
+          echo "SKIPPED_SAME_TARGET=$SKIPPED_SAME_TARGET"
+          echo "SKIPPED_MISSING_FIELDS=$SKIPPED_MISSING_FIELDS"
+          echo "ERROR_ITEMS=$ERROR_ITEMS"
+          echo "============================================="
+
+          if [ "$ERROR_ITEMS" -gt 0 ]; then
+            echo "::warning::Completed with update errors. Check logs above."
+          else
+            echo "Completed successfully."
+          fi
