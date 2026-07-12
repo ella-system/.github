@@ -1,8 +1,8 @@
-name: Recalculate Target Date from Days
+name: Recalculate Target Date and Hours from Days
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -12,20 +12,34 @@ jobs:
       GH_TOKEN: ${{ secrets.PROJECT_PAT }}
       ORG: ella-system
       PROJECT_NUMBER: 4
+
+      DAYS_FIELD_NAME: Days
+      START_FIELD_NAME: Issue start
+      END_FIELD_NAME: Issue end
+      HOURS_AVAIL_FIELD_NAME: Hours availability
+      HOURS_FIELD_NAME: Hours
+
     steps:
-      - name: Fetch project items and recalc dates
+      - name: Fetch project items and recalc dates/hours
         run: |
           set -Eeuo pipefail
 
-          echo "==> Starting recalculate-target-date workflow"
+          echo "==> Starting recalculate-target-date-and-hours workflow"
           echo "UTC now: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           echo "ORG=$ORG PROJECT_NUMBER=$PROJECT_NUMBER"
 
           TOTAL_ITEMS=0
-          ELIGIBLE_ITEMS=0
-          UPDATED_ITEMS=0
-          SKIPPED_SAME_TARGET=0
-          SKIPPED_MISSING_FIELDS=0
+
+          ELIGIBLE_END_ITEMS=0
+          UPDATED_END_ITEMS=0
+          SKIPPED_SAME_END=0
+          SKIPPED_MISSING_END_FIELDS=0
+
+          ELIGIBLE_HOURS_ITEMS=0
+          UPDATED_HOURS_ITEMS=0
+          SKIPPED_SAME_HOURS=0
+          SKIPPED_MISSING_HOURS_FIELDS=0
+
           ERROR_ITEMS=0
 
           echo "==> Loading project metadata and field IDs..."
@@ -46,19 +60,30 @@ jobs:
 
           PROJECT_ID=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.id // empty')
           PROJECT_TITLE=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.title // empty')
-          DAYS_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Days") | .id' | head -n1)
-          START_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Start date") | .id' | head -n1)
-          TARGET_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="Target date") | .id' | head -n1)
+
+          DAYS_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r --arg n "$DAYS_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)
+          START_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r --arg n "$START_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)
+          END_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r --arg n "$END_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)
+          HOURS_AVAIL_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r --arg n "$HOURS_AVAIL_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)
+          HOURS_FIELD_ID=$(echo "$PROJECT_JSON" | jq -r --arg n "$HOURS_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)
 
           echo "Project title: ${PROJECT_TITLE:-<empty>}"
           echo "PROJECT_ID=${PROJECT_ID:-<empty>}"
-          echo "DAYS_FIELD_ID=${DAYS_FIELD_ID:-<empty>}"
-          echo "START_FIELD_ID=${START_FIELD_ID:-<empty>}"
-          echo "TARGET_FIELD_ID=${TARGET_FIELD_ID:-<empty>}"
+          echo "DAYS_FIELD_ID(${DAYS_FIELD_NAME})=${DAYS_FIELD_ID:-<empty>}"
+          echo "START_FIELD_ID(${START_FIELD_NAME})=${START_FIELD_ID:-<empty>}"
+          echo "END_FIELD_ID(${END_FIELD_NAME})=${END_FIELD_ID:-<empty>}"
+          echo "HOURS_AVAIL_FIELD_ID(${HOURS_AVAIL_FIELD_NAME})=${HOURS_AVAIL_FIELD_ID:-<empty>}"
+          echo "HOURS_FIELD_ID(${HOURS_FIELD_NAME})=${HOURS_FIELD_ID:-<empty>}"
 
-          if [ -z "${PROJECT_ID:-}" ] || [ -z "${DAYS_FIELD_ID:-}" ] || [ -z "${START_FIELD_ID:-}" ] || [ -z "${TARGET_FIELD_ID:-}" ]; then
-            echo "::error::Missing required project/field IDs. Check field names exactly: Days, Start date, Target date."
-            echo "Available fields:"
+          if [ -z "${PROJECT_ID:-}" ] || [ -z "${DAYS_FIELD_ID:-}" ] || [ -z "${START_FIELD_ID:-}" ] || [ -z "${END_FIELD_ID:-}" ] || [ -z "${HOURS_AVAIL_FIELD_ID:-}" ] || [ -z "${HOURS_FIELD_ID:-}" ]; then
+            echo "::error::Missing required project/field IDs."
+            echo "Expected field names:"
+            echo " - $DAYS_FIELD_NAME"
+            echo " - $START_FIELD_NAME"
+            echo " - $END_FIELD_NAME"
+            echo " - $HOURS_AVAIL_FIELD_NAME"
+            echo " - $HOURS_FIELD_NAME"
+            echo "Available project fields:"
             echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.fields.nodes[]?.name'
             exit 1
           fi
@@ -73,184 +98,31 @@ jobs:
 
             if [ -n "$AFTER" ]; then
               ITEMS_JSON=$(gh api graphql -f query='
-                query($org:String!, $number:Int!, $after:String) {
+                query($org:String!, $number:Int!, $after:String, $daysField:String!, $startField:String!, $endField:String!, $hoursAvailField:String!, $hoursField:String!) {
                   organization(login:$org) {
                     projectV2(number:$number) {
                       items(first:100, after:$after) {
                         pageInfo { hasNextPage endCursor }
                         nodes {
                           id
-
-                          daysValue: fieldValueByName(name: "Days") {
+                          daysValue: fieldValueByName(name: $daysField) {
                             __typename
                             ... on ProjectV2ItemFieldNumberValue { number }
                             ... on ProjectV2ItemFieldTextValue { text }
                           }
-
-                          startValue: fieldValueByName(name: "Start date") {
+                          startValue: fieldValueByName(name: $startField) {
                             __typename
                             ... on ProjectV2ItemFieldDateValue { date }
                             ... on ProjectV2ItemFieldTextValue { text }
                           }
-
-                          targetValue: fieldValueByName(name: "Target date") {
+                          endValue: fieldValueByName(name: $endField) {
                             __typename
                             ... on ProjectV2ItemFieldDateValue { date }
                             ... on ProjectV2ItemFieldTextValue { text }
                           }
-
-                          content {
-                            __typename
-                            ... on Issue { number title url }
-                            ... on PullRequest { number title url }
-                            ... on DraftIssue { title }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }' -f org="$ORG" -F number=$PROJECT_NUMBER -f after="$AFTER")
-            else
-              ITEMS_JSON=$(gh api graphql -f query='
-                query($org:String!, $number:Int!, $after:String) {
-                  organization(login:$org) {
-                    projectV2(number:$number) {
-                      items(first:100, after:$after) {
-                        pageInfo { hasNextPage endCursor }
-                        nodes {
-                          id
-
-                          daysValue: fieldValueByName(name: "Days") {
+                          hoursAvailValue: fieldValueByName(name: $hoursAvailField) {
                             __typename
                             ... on ProjectV2ItemFieldNumberValue { number }
                             ... on ProjectV2ItemFieldTextValue { text }
-                          }
-
-                          startValue: fieldValueByName(name: "Start date") {
-                            __typename
-                            ... on ProjectV2ItemFieldDateValue { date }
-                            ... on ProjectV2ItemFieldTextValue { text }
-                          }
-
-                          targetValue: fieldValueByName(name: "Target date") {
-                            __typename
-                            ... on ProjectV2ItemFieldDateValue { date }
-                            ... on ProjectV2ItemFieldTextValue { text }
-                          }
-
-                          content {
-                            __typename
-                            ... on Issue { number title url }
-                            ... on PullRequest { number title url }
-                            ... on DraftIssue { title }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }' -f org="$ORG" -F number=$PROJECT_NUMBER)
-            fi
-
-            PAGE_COUNT=$(echo "$ITEMS_JSON" | jq '.data.organization.projectV2.items.nodes | length')
-            echo "Page $PAGE items: $PAGE_COUNT"
-
-            while IFS= read -r item; do
-              TOTAL_ITEMS=$((TOTAL_ITEMS + 1))
-
-              ITEM_ID=$(echo "$item" | jq -r '.id')
-              CONTENT_TYPE=$(echo "$item" | jq -r '.content.__typename // "Unknown"')
-              ITEM_URL=$(echo "$item" | jq -r '.content.url // empty')
-              ITEM_TITLE=$(echo "$item" | jq -r '.content.title // "<no title>"')
-              ITEM_NUMBER=$(echo "$item" | jq -r '.content.number // empty')
-
-              DAYS_RAW=$(echo "$item" | jq -r '.daysValue.number // .daysValue.text // empty')
-              START=$(echo "$item" | jq -r '.startValue.date // .startValue.text // empty')
-              CURRENT_TARGET=$(echo "$item" | jq -r '.targetValue.date // .targetValue.text // empty')
-
-              DAYS=""
-              if [ -n "$DAYS_RAW" ]; then
-                DAYS=$(printf "%.0f" "$DAYS_RAW")
-              fi
-
-              echo ""
-              echo "Item #$TOTAL_ITEMS | itemId=$ITEM_ID | type=$CONTENT_TYPE | number=${ITEM_NUMBER:-n/a}"
-              echo "Title: $ITEM_TITLE"
-              [ -n "$ITEM_URL" ] && echo "URL: $ITEM_URL"
-              echo "Field types => Days=$(echo "$item" | jq -r '.daysValue.__typename // "null"') Start=$(echo "$item" | jq -r '.startValue.__typename // "null"') Target=$(echo "$item" | jq -r '.targetValue.__typename // "null"')"
-              echo "Fields => Days(raw)='${DAYS_RAW:-}' Days(int)='${DAYS:-}' Start='${START:-}' CurrentTarget='${CURRENT_TARGET:-}'"
-
-              if [ -z "$DAYS" ] || [ -z "$START" ]; then
-                SKIPPED_MISSING_FIELDS=$((SKIPPED_MISSING_FIELDS + 1))
-                echo "Result: SKIP (missing Days or Start date)"
-                continue
-              fi
-
-              ELIGIBLE_ITEMS=$((ELIGIBLE_ITEMS + 1))
-              NEW_TARGET=$(date -u -d "$START + $DAYS days" +%Y-%m-%d)
-              echo "Computed NEW_TARGET=$NEW_TARGET"
-
-              if [ "$NEW_TARGET" = "$CURRENT_TARGET" ]; then
-                SKIPPED_SAME_TARGET=$((SKIPPED_SAME_TARGET + 1))
-                echo "Result: SKIP (target already correct)"
-                continue
-              fi
-
-              echo "Updating Target date: '$CURRENT_TARGET' -> '$NEW_TARGET'"
-
-              set +e
-              UPDATE_OUTPUT=$(gh api graphql -f query='
-                mutation($project:ID!, $item:ID!, $field:ID!, $date:String!) {
-                  updateProjectV2ItemFieldValue(input: {
-                    projectId: $project,
-                    itemId: $item,
-                    fieldId: $field,
-                    value: { date: $date }
-                  }) {
-                    projectV2Item { id }
-                  }
-                }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$TARGET_FIELD_ID" -f date="$NEW_TARGET" 2>&1)
-              STATUS=$?
-              set -e
-
-              if [ $STATUS -ne 0 ]; then
-                ERROR_ITEMS=$((ERROR_ITEMS + 1))
-                echo "::error::Failed to update item $ITEM_ID"
-                echo "$UPDATE_OUTPUT"
-              else
-                UPDATED_ITEMS=$((UPDATED_ITEMS + 1))
-                echo "Result: UPDATED"
-              fi
-            done < <(echo "$ITEMS_JSON" | jq -c '.data.organization.projectV2.items.nodes[]')
-
-            HAS_NEXT=$(echo "$ITEMS_JSON" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')
-            END_CURSOR=$(echo "$ITEMS_JSON" | jq -r '.data.organization.projectV2.items.pageInfo.endCursor // empty')
-
-            echo "PageInfo => hasNextPage=$HAS_NEXT endCursor=${END_CURSOR:-<empty>}"
-
-            if [ "$HAS_NEXT" != "true" ]; then
-              break
-            fi
-
-            if [ -z "$END_CURSOR" ]; then
-              echo "::error::hasNextPage=true but endCursor is empty. Aborting to avoid infinite loop."
-              exit 1
-            fi
-
-            AFTER="$END_CURSOR"
-          done
-
-          echo ""
-          echo "================== SUMMARY =================="
-          echo "TOTAL_ITEMS=$TOTAL_ITEMS"
-          echo "ELIGIBLE_ITEMS=$ELIGIBLE_ITEMS"
-          echo "UPDATED_ITEMS=$UPDATED_ITEMS"
-          echo "SKIPPED_SAME_TARGET=$SKIPPED_SAME_TARGET"
-          echo "SKIPPED_MISSING_FIELDS=$SKIPPED_MISSING_FIELDS"
-          echo "ERROR_ITEMS=$ERROR_ITEMS"
-          echo "============================================="
-
-          if [ "$ERROR_ITEMS" -gt 0 ]; then
-            echo "::warning::Completed with update errors. Check logs above."
-          else
-            echo "Completed successfully."
-          fi
+                          }](#)*
+
