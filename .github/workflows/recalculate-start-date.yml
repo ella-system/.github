@@ -1,1 +1,269 @@
-# github
+name: Recalculate Issue Start from Project Start Date
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  recalc:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+      ORG: ella-system
+      PROJECT_NUMBER: 4
+
+      PROJECT_START_FIELD_NAME: Project start date
+      START_FIELD_NAME: Issue start
+
+    steps:
+      - name: Fetch project items and recalc issue start dates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "==> Starting recalculate-start-date workflow"
+          echo "UTC now: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          echo "ORG=$ORG PROJECT_NUMBER=$PROJECT_NUMBER"
+
+          TOTAL_ITEMS=0
+          START_ITEMS_COUNT=0
+          UPDATED_START_ITEMS=0
+          SKIPPED_SAME_START=0
+          SKIPPED_MISSING_START=0
+          ERROR_ITEMS=0
+
+          PROJECT_START_DATE=""
+          MIN_ISSUE_START=""
+
+          TMP_ITEMS="$(mktemp)"
+          trap 'rm -f "$TMP_ITEMS"' EXIT
+
+          echo "==> Loading project metadata and field IDs..."
+          PROJECT_JSON="$(gh api graphql -f query='
+            query($org:String!, $number:Int!) {
+              organization(login:$org) {
+                projectV2(number:$number) {
+                  id
+                  title
+                  fields(first:100) {
+                    nodes {
+                      ... on ProjectV2FieldCommon { id name }
+                    }
+                  }
+                }
+              }
+            }' -f org="$ORG" -F number="$PROJECT_NUMBER")"
+
+          PROJECT_ID="$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.id // empty')"
+          PROJECT_TITLE="$(echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.title // empty')"
+
+          PROJECT_START_FIELD_ID="$(echo "$PROJECT_JSON" | jq -r --arg n "$PROJECT_START_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)"
+          START_FIELD_ID="$(echo "$PROJECT_JSON" | jq -r --arg n "$START_FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$n) | .id' | head -n1)"
+
+          echo "Project title: ${PROJECT_TITLE:-<empty>}"
+          echo "PROJECT_ID=${PROJECT_ID:-<empty>}"
+          echo "PROJECT_START_FIELD_ID(${PROJECT_START_FIELD_NAME})=${PROJECT_START_FIELD_ID:-<empty>}"
+          echo "START_FIELD_ID(${START_FIELD_NAME})=${START_FIELD_ID:-<empty>}"
+
+          if [ -z "${PROJECT_ID:-}" ] || [ -z "${PROJECT_START_FIELD_ID:-}" ] || [ -z "${START_FIELD_ID:-}" ]; then
+            echo "::error::Missing required project/field IDs."
+            echo "Expected field names:"
+            echo " - $PROJECT_START_FIELD_NAME"
+            echo " - $START_FIELD_NAME"
+            echo "Available project fields:"
+            echo "$PROJECT_JSON" | jq -r '.data.organization.projectV2.fields.nodes[]?.name'
+            exit 1
+          fi
+
+          echo "==> Fetching project items with pagination to compute anchor and offset..."
+          AFTER=""
+          PAGE=0
+
+          while :; do
+            PAGE=$((PAGE + 1))
+            echo "---- Page $PAGE (after=${AFTER:-<none>})"
+
+            if [ -n "$AFTER" ]; then
+              ITEMS_JSON="$(gh api graphql -f query='
+                query($org:String!, $number:Int!, $after:String, $projectStartField:String!, $startField:String!) {
+                  organization(login:$org) {
+                    projectV2(number:$number) {
+                      items(first:100, after:$after) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                          id
+                          projectStartValue: fieldValueByName(name: $projectStartField) {
+                            __typename
+                            ... on ProjectV2ItemFieldDateValue { date }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+                          startValue: fieldValueByName(name: $startField) {
+                            __typename
+                            ... on ProjectV2ItemFieldDateValue { date }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }' \
+                -f org="$ORG" \
+                -F number="$PROJECT_NUMBER" \
+                -f after="$AFTER" \
+                -f projectStartField="$PROJECT_START_FIELD_NAME" \
+                -f startField="$START_FIELD_NAME")"
+            else
+              ITEMS_JSON="$(gh api graphql -f query='
+                query($org:String!, $number:Int!, $projectStartField:String!, $startField:String!) {
+                  organization(login:$org) {
+                    projectV2(number:$number) {
+                      items(first:100) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                          id
+                          projectStartValue: fieldValueByName(name: $projectStartField) {
+                            __typename
+                            ... on ProjectV2ItemFieldDateValue { date }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+                          startValue: fieldValueByName(name: $startField) {
+                            __typename
+                            ... on ProjectV2ItemFieldDateValue { date }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }' \
+                -f org="$ORG" \
+                -F number="$PROJECT_NUMBER" \
+                -f projectStartField="$PROJECT_START_FIELD_NAME" \
+                -f startField="$START_FIELD_NAME")"
+            fi
+
+            PAGE_COUNT="$(echo "$ITEMS_JSON" | jq '.data.organization.projectV2.items.nodes | length')"
+            echo "Items on this page: $PAGE_COUNT"
+
+            while IFS= read -r ITEM_B64; do
+              [ -z "$ITEM_B64" ] && continue
+              TOTAL_ITEMS=$((TOTAL_ITEMS + 1))
+
+              ITEM_JSON="$(echo "$ITEM_B64" | base64 --decode)"
+              ITEM_ID="$(echo "$ITEM_JSON" | jq -r '.id')"
+
+              project_start_raw="$(echo "$ITEM_JSON" | jq -r '
+                if .projectStartValue == null then ""
+                elif .projectStartValue.__typename == "ProjectV2ItemFieldDateValue" then (.projectStartValue.date // "")
+                elif .projectStartValue.__typename == "ProjectV2ItemFieldTextValue" then (.projectStartValue.text // "")
+                else "" end
+              ')"
+
+              start_raw="$(echo "$ITEM_JSON" | jq -r '
+                if .startValue == null then ""
+                elif .startValue.__typename == "ProjectV2ItemFieldDateValue" then (.startValue.date // "")
+                elif .startValue.__typename == "ProjectV2ItemFieldTextValue" then (.startValue.text // "")
+                else "" end
+              ')"
+
+              if [ -z "$PROJECT_START_DATE" ] && [ -n "$project_start_raw" ]; then
+                PROJECT_START_DATE="$project_start_raw"
+                echo "Using Project start date='$PROJECT_START_DATE' from item=$ITEM_ID"
+              fi
+
+              if [ -n "$start_raw" ]; then
+                START_ITEMS_COUNT=$((START_ITEMS_COUNT + 1))
+                echo "${ITEM_ID}|${start_raw}" >> "$TMP_ITEMS"
+
+                if [ -z "$MIN_ISSUE_START" ] || [[ "$start_raw" < "$MIN_ISSUE_START" ]]; then
+                  MIN_ISSUE_START="$start_raw"
+                fi
+              fi
+            done < <(echo "$ITEMS_JSON" | jq -r '.data.organization.projectV2.items.nodes[] | @base64')
+
+            HAS_NEXT="$(echo "$ITEMS_JSON" | jq -r '.data.organization.projectV2.items.pageInfo.hasNextPage')"
+            END_CURSOR="$(echo "$ITEMS_JSON" | jq -r '.data.organization.projectV2.items.pageInfo.endCursor // empty')"
+
+            if [ "$HAS_NEXT" = "true" ] && [ -n "$END_CURSOR" ]; then
+              AFTER="$END_CURSOR"
+            else
+              break
+            fi
+          done
+
+          SKIPPED_MISSING_START=$((TOTAL_ITEMS - START_ITEMS_COUNT))
+
+          if [ -z "$PROJECT_START_DATE" ]; then
+            echo "Project start date is not set on any item. Nothing to do."
+            echo "TOTAL_ITEMS=$TOTAL_ITEMS START_ITEMS_COUNT=$START_ITEMS_COUNT SKIPPED_MISSING_START=$SKIPPED_MISSING_START"
+            exit 0
+          fi
+
+          if [ -z "$MIN_ISSUE_START" ]; then
+            echo "No items with '$START_FIELD_NAME' set. Nothing to do."
+            echo "TOTAL_ITEMS=$TOTAL_ITEMS START_ITEMS_COUNT=$START_ITEMS_COUNT SKIPPED_MISSING_START=$SKIPPED_MISSING_START"
+            exit 0
+          fi
+
+          project_start_epoch="$(date -u -d "$PROJECT_START_DATE" '+%s' 2>/dev/null || true)"
+          min_issue_start_epoch="$(date -u -d "$MIN_ISSUE_START" '+%s' 2>/dev/null || true)"
+
+          if [ -z "$project_start_epoch" ] || [ -z "$min_issue_start_epoch" ]; then
+            echo "::error::Invalid date value(s): PROJECT_START_DATE='$PROJECT_START_DATE' MIN_ISSUE_START='$MIN_ISSUE_START'"
+            exit 1
+          fi
+
+          OFFSET_DAYS=$(( (project_start_epoch - min_issue_start_epoch) / 86400 ))
+
+          echo "Computed anchor: PROJECT_START_DATE=$PROJECT_START_DATE MIN_ISSUE_START=$MIN_ISSUE_START OFFSET_DAYS=$OFFSET_DAYS"
+
+          if [ "$OFFSET_DAYS" -eq 0 ]; then
+            echo "Offset is 0 days. No updates required."
+            echo "TOTAL_ITEMS=$TOTAL_ITEMS START_ITEMS_COUNT=$START_ITEMS_COUNT SKIPPED_MISSING_START=$SKIPPED_MISSING_START"
+            exit 0
+          fi
+
+          echo "==> Applying Issue start shift to all eligible items..."
+          while IFS='|' read -r ITEM_ID start_raw; do
+            [ -z "${ITEM_ID:-}" ] && continue
+            [ -z "${start_raw:-}" ] && continue
+
+            new_start="$(date -u -d "$start_raw ${OFFSET_DAYS} days" '+%Y-%m-%d' 2>/dev/null || true)"
+            if [ -z "$new_start" ]; then
+              echo "WARN: item=$ITEM_ID invalid start date='$start_raw' (skipping)"
+              ERROR_ITEMS=$((ERROR_ITEMS + 1))
+              continue
+            fi
+
+            if [ "$new_start" != "$start_raw" ]; then
+              if ! gh api graphql -f query='
+                mutation($project:ID!, $item:ID!, $field:ID!, $date:Date!) {
+                  updateProjectV2ItemFieldValue(input:{
+                    projectId:$project
+                    itemId:$item
+                    fieldId:$field
+                    value:{ date:$date }
+                  }) {
+                    projectV2Item { id }
+                  }
+                }' \
+                -f project="$PROJECT_ID" \
+                -f item="$ITEM_ID" \
+                -f field="$START_FIELD_ID" \
+                -f date="$new_start" >/dev/null; then
+                echo "WARN: failed updating START for item=$ITEM_ID (new_start=$new_start)"
+                ERROR_ITEMS=$((ERROR_ITEMS + 1))
+              else
+                UPDATED_START_ITEMS=$((UPDATED_START_ITEMS + 1))
+                echo "Updated START: item=$ITEM_ID old_start=$start_raw new_start=$new_start"
+              fi
+            else
+              SKIPPED_SAME_START=$((SKIPPED_SAME_START + 1))
+            fi
+          done < "$TMP_ITEMS"
+
+          echo "==> Done"
+          echo "TOTAL_ITEMS=$TOTAL_ITEMS"
+          echo "START_ITEMS_COUNT=$START_ITEMS_COUNT UPDATED_START_ITEMS=$UPDATED_START_ITEMS SKIPPED_SAME_START=$SKIPPED_SAME_START SKIPPED_MISSING_START=$SKIPPED_MISSING_START"
+          echo "ERROR_ITEMS=$ERROR_ITEMS"
