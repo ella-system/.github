@@ -80,23 +80,25 @@ jobs:
                         pageInfo { hasNextPage endCursor }
                         nodes {
                           id
-                          fieldValues(first:50) {
-                            nodes {
-                              __typename
-                              ... on ProjectV2ItemFieldNumberValue {
-                                number
-                                field { ... on ProjectV2FieldCommon { name } }
-                              }
-                              ... on ProjectV2ItemFieldDateValue {
-                                date
-                                field { ... on ProjectV2FieldCommon { name } }
-                              }
-                              ... on ProjectV2ItemFieldTextValue {
-                                text
-                                field { ... on ProjectV2FieldCommon { name } }
-                              }
-                            }
+
+                          daysValue: fieldValueByName(name: "Days") {
+                            __typename
+                            ... on ProjectV2ItemFieldNumberValue { number }
+                            ... on ProjectV2ItemFieldTextValue { text }
                           }
+
+                          startValue: fieldValueByName(name: "Start date") {
+                            __typename
+                            ... on ProjectV2ItemFieldDateValue { date }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+
+                          targetValue: fieldValueByName(name: "Target date") {
+                            __typename
+                            ... on ProjectV2ItemFieldDateValue { date }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+
                           content {
                             __typename
                             ... on Issue { number title url }
@@ -117,23 +119,25 @@ jobs:
                         pageInfo { hasNextPage endCursor }
                         nodes {
                           id
-                          fieldValues(first:50) {
-                            nodes {
-                              __typename
-                              ... on ProjectV2ItemFieldNumberValue {
-                                number
-                                field { ... on ProjectV2FieldCommon { name } }
-                              }
-                              ... on ProjectV2ItemFieldDateValue {
-                                date
-                                field { ... on ProjectV2FieldCommon { name } }
-                              }
-                              ... on ProjectV2ItemFieldTextValue {
-                                text
-                                field { ... on ProjectV2FieldCommon { name } }
-                              }
-                            }
+
+                          daysValue: fieldValueByName(name: "Days") {
+                            __typename
+                            ... on ProjectV2ItemFieldNumberValue { number }
+                            ... on ProjectV2ItemFieldTextValue { text }
                           }
+
+                          startValue: fieldValueByName(name: "Start date") {
+                            __typename
+                            ... on ProjectV2ItemFieldDateValue { date }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+
+                          targetValue: fieldValueByName(name: "Target date") {
+                            __typename
+                            ... on ProjectV2ItemFieldDateValue { date }
+                            ... on ProjectV2ItemFieldTextValue { text }
+                          }
+
                           content {
                             __typename
                             ... on Issue { number title url }
@@ -159,9 +163,9 @@ jobs:
               ITEM_TITLE=$(echo "$item" | jq -r '.content.title // "<no title>"')
               ITEM_NUMBER=$(echo "$item" | jq -r '.content.number // empty')
 
-              DAYS_RAW=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Days") | (.number // .text // empty)' | head -n1)
-              START=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Start date") | (.date // .text // empty)' | head -n1)
-              CURRENT_TARGET=$(echo "$item" | jq -r '.fieldValues.nodes[] | select(.field.name=="Target date") | (.date // .text // empty)' | head -n1)
+              DAYS_RAW=$(echo "$item" | jq -r '.daysValue.number // .daysValue.text // empty')
+              START=$(echo "$item" | jq -r '.startValue.date // .startValue.text // empty')
+              CURRENT_TARGET=$(echo "$item" | jq -r '.targetValue.date // .targetValue.text // empty')
 
               DAYS=""
               if [ -n "$DAYS_RAW" ]; then
@@ -172,6 +176,7 @@ jobs:
               echo "Item #$TOTAL_ITEMS | itemId=$ITEM_ID | type=$CONTENT_TYPE | number=${ITEM_NUMBER:-n/a}"
               echo "Title: $ITEM_TITLE"
               [ -n "$ITEM_URL" ] && echo "URL: $ITEM_URL"
+              echo "Field types => Days=$(echo "$item" | jq -r '.daysValue.__typename // "null"') Start=$(echo "$item" | jq -r '.startValue.__typename // "null"') Target=$(echo "$item" | jq -r '.targetValue.__typename // "null"')"
               echo "Fields => Days(raw)='${DAYS_RAW:-}' Days(int)='${DAYS:-}' Start='${START:-}' CurrentTarget='${CURRENT_TARGET:-}'"
 
               if [ -z "$DAYS" ] || [ -z "$START" ]; then
