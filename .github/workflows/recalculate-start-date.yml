@@ -1,1 +1,314 @@
-# github
+name: Recalculate Issue Start Dates
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_owner:
+        description: "Owner do projeto (org ou user), ex: ella-system"
+        required: true
+        type: string
+      project_number:
+        description: "Número do Project (v2), ex: 7"
+        required: true
+        type: string
+      dry_run:
+        description: "Se true, não grava mudanças (apenas log)"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  recalculate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Recalculate Issue start by Project start date offset
+        uses: actions/github-script@v7
+        env:
+          PROJECT_OWNER: ${{ inputs.project_owner }}
+          PROJECT_NUMBER: ${{ inputs.project_number }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        with:
+          github-token: ${{ secrets.PROJECTS_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = process.env.PROJECT_OWNER;
+            const projectNumber = Number(process.env.PROJECT_NUMBER);
+            const dryRun = String(process.env.DRY_RUN).toLowerCase() === "true";
+
+            if (!owner || !projectNumber) {
+              core.setFailed("Inputs inválidos: project_owner e project_number são obrigatórios.");
+              return;
+            }
+
+            core.info(`Owner: ${owner}`);
+            core.info(`Project number: ${projectNumber}`);
+            core.info(`Dry run: ${dryRun}`);
+
+            // ---------- Helpers ----------
+            const toDateOnly = (iso) => {
+              // Garante YYYY-MM-DD em UTC
+              const d = new Date(iso);
+              return d.toISOString().slice(0, 10);
+            };
+
+            const addDaysDateOnly = (yyyyMmDd, days) => {
+              const d = new Date(`${yyyyMmDd}T00:00:00Z`);
+              d.setUTCDate(d.getUTCDate() + days);
+              return d.toISOString().slice(0, 10);
+            };
+
+            const diffDays = (fromYmd, toYmd) => {
+              // to - from, em dias inteiros UTC
+              const a = new Date(`${fromYmd}T00:00:00Z`);
+              const b = new Date(`${toYmd}T00:00:00Z`);
+              return Math.round((b - a) / 86400000);
+            };
+
+            // ---------- Discover project id (org first, fallback user) ----------
+            const qOrg = `
+              query($owner: String!, $number: Int!) {
+                organization(login: $owner) {
+                  projectV2(number: $number) {
+                    id
+                    title
+                    fields(first: 100) {
+                      nodes {
+                        ... on ProjectV2FieldCommon { id name }
+                        ... on ProjectV2SingleSelectField { id name options { id name } }
+                        ... on ProjectV2IterationField { id name configuration { iterations { id title } } }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            const qUser = `
+              query($owner: String!, $number: Int!) {
+                user(login: $owner) {
+                  projectV2(number: $number) {
+                    id
+                    title
+                    fields(first: 100) {
+                      nodes {
+                        ... on ProjectV2FieldCommon { id name }
+                        ... on ProjectV2SingleSelectField { id name options { id name } }
+                        ... on ProjectV2IterationField { id name configuration { iterations { id title } } }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            let project = null;
+            let projectContainerType = null;
+
+            {
+              const orgRes = await github.graphql(qOrg, { owner, number: projectNumber }).catch(() => null);
+              project = orgRes?.organization?.projectV2 ?? null;
+              if (project) projectContainerType = "organization";
+            }
+
+            if (!project) {
+              const userRes = await github.graphql(qUser, { owner, number: projectNumber }).catch(() => null);
+              project = userRes?.user?.projectV2 ?? null;
+              if (project) projectContainerType = "user";
+            }
+
+            if (!project) {
+              core.setFailed(`ProjectV2 #${projectNumber} não encontrado em owner "${owner}".`);
+              return;
+            }
+
+            core.info(`Projeto encontrado (${projectContainerType}): ${project.title} (${project.id})`);
+
+            // ---------- Locate fields ----------
+            const fields = project.fields.nodes || [];
+            const projectStartField = fields.find(f => f?.name === "Project start date");
+            const issueStartField = fields.find(f => f?.name === "Issue start");
+
+            if (!projectStartField) {
+              core.setFailed(`Campo "Project start date" não encontrado no projeto.`);
+              return;
+            }
+            if (!issueStartField) {
+              core.setFailed(`Campo "Issue start" não encontrado no projeto.`);
+              return;
+            }
+
+            core.info(`Field Project start date: ${projectStartField.id}`);
+            core.info(`Field Issue start: ${issueStartField.id}`);
+
+            // ---------- Read all items with pagination ----------
+            const qItems = `
+              query($projectId: ID!, $after: String) {
+                node(id: $projectId) {
+                  ... on ProjectV2 {
+                    items(first: 100, after: $after) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        id
+                        content {
+                          __typename
+                          ... on Issue {
+                            id
+                            number
+                            title
+                            repository { nameWithOwner }
+                          }
+                          ... on PullRequest {
+                            id
+                            number
+                            title
+                            repository { nameWithOwner }
+                          }
+                          ... on DraftIssue {
+                            id
+                            title
+                          }
+                        }
+                        fieldValues(first: 100) {
+                          nodes {
+                            __typename
+                            ... on ProjectV2ItemFieldDateValue {
+                              date
+                              field { ... on ProjectV2FieldCommon { id name } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            let allItems = [];
+            let after = null;
+            while (true) {
+              const res = await github.graphql(qItems, { projectId: project.id, after });
+              const itemsConn = res?.node?.items;
+              const pageItems = itemsConn?.nodes || [];
+              allItems.push(...pageItems);
+
+              if (!itemsConn?.pageInfo?.hasNextPage) break;
+              after = itemsConn.pageInfo.endCursor;
+            }
+
+            core.info(`Itens totais no projeto: ${allItems.length}`);
+
+            // ---------- Extract Project start date value ----------
+            // Project-level field value vem de item? Não. Precisamos ler do próprio projeto.
+            // Em ProjectV2, campo "Project start date" (quando criado como field) é item field.
+            // Para "data de início do projeto", vamos usar a estratégia:
+            // - Procurar no primeiro item que tenha valor para "Project start date"
+            // Se você usar esse campo realmente no nível do projeto via UI, essa abordagem ainda precisa
+            // que o valor esteja presente em itens. Caso contrário, adapte para fonte externa.
+            // Aqui assumimos uso dentro dos itens (como você descreveu no fluxo).
+            //
+            // Melhor abordagem prática: pegar o valor mais frequente / primeiro encontrado.
+            let newProjectStart = null;
+            for (const item of allItems) {
+              const vals = item?.fieldValues?.nodes || [];
+              const v = vals.find(x =>
+                x?.__typename === "ProjectV2ItemFieldDateValue" &&
+                x?.field?.id === projectStartField.id &&
+                x?.date
+              );
+              if (v?.date) {
+                newProjectStart = toDateOnly(v.date);
+                break;
+              }
+            }
+
+            if (!newProjectStart) {
+              core.setFailed(`Não foi encontrado valor para "Project start date" em nenhum item.`);
+              return;
+            }
+
+            core.info(`Novo Project start date: ${newProjectStart}`);
+
+            // ---------- Build issue list with Issue start ----------
+            const issueItems = allItems
+              .filter(i => i?.content?.__typename === "Issue")
+              .map(i => {
+                const vals = i?.fieldValues?.nodes || [];
+                const issueStart = vals.find(x =>
+                  x?.__typename === "ProjectV2ItemFieldDateValue" &&
+                  x?.field?.id === issueStartField.id &&
+                  x?.date
+                )?.date || null;
+
+                return {
+                  itemId: i.id,
+                  issueNumber: i.content.number,
+                  repo: i.content.repository?.nameWithOwner,
+                  title: i.content.title,
+                  issueStart: issueStart ? toDateOnly(issueStart) : null
+                };
+              });
+
+            const issuesWithStart = issueItems.filter(i => !!i.issueStart);
+
+            if (issuesWithStart.length === 0) {
+              core.setFailed(`Nenhuma Issue com "Issue start" preenchido foi encontrada.`);
+              return;
+            }
+
+            // Baseline = menor Issue start (primeira issue no tempo)
+            issuesWithStart.sort((a, b) => a.issueStart.localeCompare(b.issueStart));
+            const baseline = issuesWithStart[0];
+
+            core.info(`Baseline issue: #${baseline.issueNumber} (${baseline.repo})`);
+            core.info(`Baseline Issue start (old): ${baseline.issueStart}`);
+
+            const delta = diffDays(baseline.issueStart, newProjectStart);
+            core.info(`Delta (dias): ${delta}  [newProjectStart - baselineIssueStart]`);
+
+            if (delta === 0) {
+              core.info("Delta = 0. Nada para atualizar.");
+              return;
+            }
+
+            // ---------- Update all issue starts ----------
+            const mUpdateDate = `
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $date: Date!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $projectId
+                  itemId: $itemId
+                  fieldId: $fieldId
+                  value: { date: $date }
+                }) {
+                  projectV2Item { id }
+                }
+              }
+            `;
+
+            let updated = 0;
+            for (const it of issuesWithStart) {
+              const oldDate = it.issueStart;
+              const newDate = addDaysDateOnly(oldDate, delta);
+
+              core.info(
+                `[${dryRun ? "DRY" : "APPLY"}] ${it.repo}#${it.issueNumber} | "${it.title}" | ${oldDate} -> ${newDate}`
+              );
+
+              if (!dryRun) {
+                await github.graphql(mUpdateDate, {
+                  projectId: project.id,
+                  itemId: it.itemId,
+                  fieldId: issueStartField.id,
+                  date: newDate
+                });
+                updated++;
+              }
+            }
+
+            if (dryRun) {
+              core.info(`DRY RUN finalizado. ${issuesWithStart.length} issues seriam atualizadas.`);
+            } else {
+              core.info(`Concluído. ${updated} issues atualizadas.`);
+            }
