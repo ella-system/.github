@@ -283,7 +283,6 @@ jobs:
               if [ -n "$days_raw" ] && [ -n "$hours_avail_raw" ]; then
                 ELIGIBLE_HOURS_ITEMS=$((ELIGIBLE_HOURS_ITEMS + 1))
 
-                # Accept values like 5, 5.0, 5,0 and convert to integer
                 days_int="$(echo "$days_raw" | tr ',' '.' | awk 'BEGIN{ok=1} /^[0-9]+([.][0]+)?$/ {print int($1); ok=0} END{if(ok) exit 1}')"
                 if [ $? -ne 0 ]; then
                   echo "WARN: item=$ITEM_ID invalid integer days='$days_raw' (skipping hours recalc)"
@@ -304,9 +303,8 @@ jobs:
                     if [ "$new_hours_int" != "${current_hours_int:-}" ]; then
                       echo "Updating HOURS: item=$ITEM_ID days=$days_int hours_avail=$hours_avail_int old=${hours_raw:-<empty>} new=$new_hours_int"
 
-                      # IMPORTANT: for this mutation, send number variable as String
                       if ! gh api graphql -f query='
-                        mutation($project:ID!, $item:ID!, $field:ID!, $value:String!) {
+                        mutation($project:ID!, $item:ID!, $field:ID!, $value:Float!) {
                           updateProjectV2ItemFieldValue(input:{
                             projectId:$project
                             itemId:$item
@@ -319,7 +317,7 @@ jobs:
                         -f project="$PROJECT_ID" \
                         -f item="$ITEM_ID" \
                         -f field="$HOURS_FIELD_ID" \
-                        -f value="$new_hours_int" \
+                        -F value="$new_hours_int" \
                         --jq '.data.updateProjectV2ItemFieldValue.projectV2Item.id' >/dev/null; then
                         echo "WARN: failed updating HOURS for item=$ITEM_ID (value=$new_hours_int)"
                         ERROR_ITEMS=$((ERROR_ITEMS + 1))
